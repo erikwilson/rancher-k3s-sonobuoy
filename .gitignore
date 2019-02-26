@@ -1,0 +1,5 @@
+/.dapper
+/output
+*.swp
+/.bash_history
+/.docker

@@ -1,0 +1,58 @@
+FROM amd64/debian:stretch
+#FROM arm64v8/debian:stretch
+
+ENV ARCH_x86_64=amd64
+ENV ARCH_aarch64=arm64
+ENV GOPATH=/go
+ENV PATH=/go/bin:/usr/local/go/bin:${PATH}
+
+RUN apt-get update
+RUN apt-get -y upgrade
+RUN apt-get -y install \
+    libterm-readline-perl-perl \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg2 \
+    software-properties-common \
+    systemd \
+    jq
+
+RUN curl -s https://download.docker.com/linux/debian/gpg | apt-key add -
+RUN ["/bin/bash", "-c", "ARCH=ARCH_$(uname -m) && \
+    add-apt-repository \"deb [arch=${!ARCH}] https://download.docker.com/linux/debian $(lsb_release -cs) stable\""]
+RUN apt-get update
+RUN apt-get -y install docker-ce
+
+RUN curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+RUN ["/bin/bash", "-c", "ARCH=ARCH_$(uname -m) && \
+    add-apt-repository \"deb [arch=${!ARCH}] https://apt.kubernetes.io/ kubernetes-xenial main\""]
+RUN apt-get update
+RUN apt-get install -y kubectl
+
+RUN ["/bin/bash", "-c", "ARCH=ARCH_$(uname -m) && \
+    curl -L https://storage.googleapis.com/golang/go1.11.linux-${!ARCH}.tar.gz | tar -xzf - -C /usr/local"]
+
+RUN go get -d github.com/heptio/sonobuoy
+RUN git -C /go/src/github.com/heptio/sonobuoy checkout -b current 2d35d971760aa10891e62fd748bef2784ade247d
+RUN go install github.com/heptio/sonobuoy
+
+ARG DAPPER_HOST_ARCH
+ENV ARCH $DAPPER_HOST_ARCH
+
+ENV DAPPER_ENV REPO TAG DRONE_TAG
+ENV DAPPER_SOURCE /go/src/github.com/rancher/k3s-sonobuoy
+ENV DAPPER_RUN_ARGS --privileged
+ENV DAPPER_DOCKER_SOCKET true
+
+ENV SHELL=/bin/bash
+ENV USER root
+ENV HOME ${DAPPER_SOURCE}
+WORKDIR ${DAPPER_SOURCE}
+
+VOLUME /var/lib/rancher/k3s
+VOLUME /var/lib/cni
+VOLUME /var/log
+
+ENTRYPOINT ["./scripts/entry"]
+CMD ["ci"]

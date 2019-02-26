@@ -1,0 +1,95 @@
+#!/bin/bash
+
+set -e
+
+K3S_PORT=$((10000 + RANDOM % 50000))
+K3S_SERVER=sonobuoy-k3s-server-${K3S_PORT}
+K3S_AGENT=sonobuoy-k3s-agent-${K3S_PORT}
+SECRET=random-$((100000 + RANDOM % 999999))
+OUTPUT=$(pwd)/output/${K3S_PORT}
+export KUBECONFIG=${OUTPUT}/kubeconfig.yaml
+
+cleanup() {
+    set +e
+    echo "Cleaning up"
+    docker rm -f ${K3S_SERVER} 2>/dev/null
+    docker rm -f ${K3S_AGENT} 2>/dev/null
+    rm ${KUBECONFIG}
+    exit
+}
+trap cleanup EXIT
+mkdir -p ${OUTPUT}
+
+fetch-kubeconfig() {
+    docker exec ${K3S_SERVER} cat /etc/rancher/k3s/k3s.yaml 2>/dev/null \
+        | tee ${KUBECONFIG}
+}
+
+count-ready-nodes() {
+    kubectl get nodes -o json \
+        | jq '.items[].status.conditions[] | select(.type == "Ready" and .status == "True") | .type' \
+        | wc -l \
+        | tr -d '[:space:]'
+}
+
+pod-ready() {
+    kubectl get pods -n kube-system -o json \
+        | jq ".items[].status.containerStatuses[] | select(.name == \"$1\") | .ready"
+}
+
+cd $(dirname $0)/..
+
+echo Running validation
+
+if [[ -n "$1" ]]; then
+    K3S_IMAGE=$1
+else
+    K3S_IMAGE=rancher/k3s
+fi
+
+docker run --name ${K3S_SERVER} --privileged \
+    -p 127.0.0.1:${K3S_PORT}:${K3S_PORT} \
+    -e K3S_CLUSTER_SECRET=${SECRET} \
+    ${K3S_IMAGE} server --https-listen-port=${K3S_PORT} \
+    > ${OUTPUT}/k3s-server.log 2>&1 &
+
+sleep 1
+K3S_IP=$(docker inspect --format '{{ .NetworkSettings.IPAddress }}' ${K3S_SERVER})
+echo "Started ${K3S_SERVER} @ ${K3S_IP}:${K3S_PORT}"
+
+while [[ -z "$(fetch-kubeconfig)" ]]; do
+    echo "Waiting for kubeconfig to become available..."
+    sleep 5
+done
+
+docker run --name ${K3S_AGENT} --privileged \
+    -e K3S_CLUSTER_SECRET=${SECRET} \
+    -e K3S_URL=https://${K3S_IP}:${K3S_PORT} \
+    ${K3S_IMAGE} \
+    > ${OUTPUT}/k3s-agent.log 2>&1 &
+
+echo "Started ${K3S_AGENT}"
+
+while [[ "$(count-ready-nodes)" != "2" ]]; do
+    echo "Waiting for nodes to be ready..."
+    sleep 5
+done
+
+echo "Nodes are ready"
+
+for service in coredns traefik; do
+    while [[ "$(pod-ready $service)" != "true" ]]; do
+        echo "Waiting for service $service to be ready..."
+        sleep 5
+    done
+    echo "Service $service is ready"
+done
+
+echo "Starting sonobuoy tests"
+
+sonobuoy run \
+    --config sonobuoy-config.json \
+    --wait \
+    ${@:2}
+
+sonobuoy retrieve ${OUTPUT}
